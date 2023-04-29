@@ -1,6 +1,7 @@
 use std::f32::consts::PI;
 
 use bevy::{
+    core_pipeline::bloom::BloomSettings,
     input::mouse::MouseMotion,
     pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap},
     prelude::*,
@@ -9,7 +10,7 @@ use bevy::{
 };
 use bevy_asset_loader::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
-use bevy_rapier3d::{prelude::*, render::RapierDebugRenderPlugin};
+use bevy_rapier3d::prelude::*;
 
 fn main() {
     App::new()
@@ -22,7 +23,7 @@ fn main() {
             ..default()
         }))
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
-        .add_plugin(RapierDebugRenderPlugin::default())
+        //.add_plugin(RapierDebugRenderPlugin::default())
         .insert_resource(RapierConfiguration {
             timestep_mode: TimestepMode::Variable {
                 max_dt: 1.0 / 20.0,
@@ -50,6 +51,7 @@ fn main() {
                 player_jump,
                 player_hold,
                 reset_request,
+                check_reach_objective,
                 anvil_held,
             )
                 .chain()
@@ -61,6 +63,9 @@ fn main() {
         .insert_resource(AmbientLight {
             color: Color::WHITE,
             brightness: 1.0 / 5.0f32,
+        })
+        .insert_resource(Progress {
+            current_objective: 0,
         })
         .run();
 }
@@ -105,8 +110,7 @@ fn player_ui(mut commands: Commands) {}
 fn grab_cursor(mut window_query: Query<&mut Window>) {
     if let Ok(mut window) = window_query.get_single_mut() {
         window.cursor.grab_mode = CursorGrabMode::Locked;
-        //window.cursor.visible = false;
-        window.cursor.visible = true;
+        window.cursor.visible = false;
     }
 }
 
@@ -150,7 +154,7 @@ fn add_scene_colliders(
     if scene_query.is_empty() {
         return;
     }
-    // very ugly
+    // very ugly, wait for anvil + testcity
     if children
         .iter_descendants(scene_query.iter().next().unwrap().0)
         .count()
@@ -173,6 +177,13 @@ fn add_scene_colliders(
                         //commands.entity(scene).insert(rapier_collider);
                     }
                 } else {
+                    if let Ok(name) = has_name.get(descendant) {
+                        if let Some(num) = name.as_ref().split("Objective").skip(1).next() {
+                            commands.entity(descendant).insert(Objective {
+                                num: num.parse().unwrap(),
+                            });
+                        }
+                    }
                     commands.entity(descendant).insert(rapier_collider);
                 }
             }
@@ -204,6 +215,16 @@ struct Held {}
 
 #[derive(Component, Default, Clone, Debug)]
 struct Transient {}
+
+#[derive(Component, Default, Clone, Debug)]
+struct Objective {
+    num: u32,
+}
+
+#[derive(Resource, Default, Clone, Debug)]
+struct Progress {
+    current_objective: u32,
+}
 
 fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
     commands.spawn((
@@ -273,6 +294,14 @@ fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
                         fov: PI / 2.0,
                         ..default()
                     }),
+                    camera: Camera {
+                        hdr: true,
+                        ..default()
+                    },
+                    ..default()
+                },
+                BloomSettings {
+                    intensity: 0.1, // the default is 0.3
                     ..default()
                 },
                 PlayerCamera {
@@ -343,7 +372,6 @@ fn player_gravity(mut player_query: Query<(&mut Player, &KinematicCharacterContr
     if let Ok((mut player, out)) = player_query.get_single_mut() {
         if out.grounded {
             player.velocity.y = 0.0;
-            player.launched = false;
         }
     }
 }
@@ -396,11 +424,11 @@ fn player_hold(
                         ));
                     } else {
                         // attract
-                        if player.velocity.length_squared() > 1.0 {
-                            delta = delta.normalize() / player.velocity.length_squared();
-                        }
-                        vel.linvel -= delta * 0.01;
-                        player.velocity += delta * 0.002;
+                        //if player.velocity.length_squared() > 1.0 {
+                        //    delta = delta.normalize() / player.velocity.length_squared();
+                        //}
+                        vel.linvel -= delta * 0.03;
+                        player.velocity += delta * 0.004;
                     }
                 }
             } else {
@@ -421,19 +449,24 @@ fn player_hold(
                 } else if keys.pressed(KeyCode::Q) && !player.launched {
                     // throw
                     player.cooldown.reset();
-                    player.launched = true;
-                    if let Ok((_, tr_cam)) = cam_query.get_single_mut() {
-                        commands
-                            .entity(anvil_ent)
-                            .insert((
-                                RigidBody::Dynamic,
-                                Velocity {
-                                    linvel: player.velocity * 80.0 + tr_cam.forward() * 10.0,
-                                    ..default()
-                                },
-                                CollisionGroups::new(Group::GROUP_2, Group::ALL),
-                            ))
-                            .remove::<Held>();
+                    let on_held_anvil = out
+                        .collisions
+                        .iter()
+                        .any(|coll| held_query.get(coll.entity).is_ok());
+                    if out.grounded && !on_held_anvil {
+                        if let Ok((_, tr_cam)) = cam_query.get_single_mut() {
+                            commands
+                                .entity(anvil_ent)
+                                .insert((
+                                    RigidBody::Dynamic,
+                                    Velocity {
+                                        linvel: player.velocity * 80.0 + tr_cam.forward() * 10.0,
+                                        ..default()
+                                    },
+                                    CollisionGroups::new(Group::GROUP_2, Group::ALL),
+                                ))
+                                .remove::<Held>();
+                        }
                     }
                 }
             }
@@ -448,7 +481,7 @@ fn anvil_held(
 ) {
     match (player_query.get_single_mut(), anvil_query.get_single_mut()) {
         (Ok((_player, tr_player)), Ok((_anvil, mut tr_anvil, _held))) => {
-            let off = tr_player.forward() * 1.2 + tr_player.up() * 0.7;
+            let off = tr_player.forward() * 1.2 + tr_player.up() * 1.0;
             tr_anvil.translation = tr_player.translation + off;
             let mut angle = tr_player.rotation.to_euler(EulerRot::XYZ).1;
             // i'm stupid, can't figure out why this is needed
@@ -458,6 +491,26 @@ fn anvil_held(
             tr_anvil.rotation = Quat::from_rotation_y(angle);
         }
         (_, _) => {}
+    }
+}
+
+fn check_reach_objective(
+    obj_query: Query<(&Objective, &Transform), Without<Objective>>,
+    anvil_query: Query<(&Anvil, &Transform), Without<Objective>>,
+    mut next_state: ResMut<NextState<GameState>>,
+    mut progress: ResMut<Progress>,
+) {
+    if let Ok((_, tr_anvil)) = anvil_query.get_single() {
+        if let Some((_, tr_current_obj)) = obj_query
+            .iter()
+            .find(|(obj, _)| obj.num == progress.current_objective)
+        {
+            let delta = tr_anvil.translation - (tr_current_obj.translation + Vec3::Y);
+            if delta.length_squared() < 25.0 {
+                next_state.set(GameState::PrepareScene);
+                progress.current_objective += 1;
+            }
+        }
     }
 }
 
