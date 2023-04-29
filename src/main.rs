@@ -1,5 +1,11 @@
+use std::f32::consts::PI;
+
 use bevy::{
-    input::mouse::MouseMotion, pbr::CascadeShadowConfigBuilder, prelude::*, scene::SceneInstance,
+    input::mouse::MouseMotion,
+    pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap},
+    prelude::*,
+    scene::SceneInstance,
+    window::{Cursor, CursorGrabMode},
 };
 use bevy_asset_loader::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -24,12 +30,18 @@ fn main() {
         )
         .add_collection_to_loading_state::<_, GameAssets>(GameState::AssetLoading)
         .add_systems(
-            (setup_graphics, spawn_player, player_ui).in_schedule(OnEnter(GameState::PrepareScene)),
+            (grab_cursor, setup_graphics, spawn_player, player_ui)
+                .in_schedule(OnEnter(GameState::PrepareScene)),
         )
         .add_system(add_scene_colliders.in_set(OnUpdate(GameState::PrepareScene)))
         .add_system(soundtrack.in_schedule(OnEnter(GameState::Play)))
-        .add_systems((movement, hands).chain().in_set(OnUpdate(GameState::Play)))
+        .add_systems(
+            (player_movement, player_gravity, player_jump, hands)
+                .chain()
+                .in_set(OnUpdate(GameState::Play)),
+        )
         .init_resource::<AudioMixer>()
+        .insert_resource(DirectionalLightShadowMap { size: 4096 })
         .run();
 }
 
@@ -47,6 +59,8 @@ struct GameAssets {
     //ost: Handle<AudioSource>,
     #[asset(path = "testcity.gltf#Scene0")]
     testcity: Handle<Scene>,
+    #[asset(path = "anvil.gltf#Scene0")]
+    anvil: Handle<Scene>,
 }
 
 #[derive(Resource, Default, Debug)]
@@ -67,6 +81,13 @@ fn soundtrack(game_assets: Res<GameAssets>, audio: Res<Audio>, mut mixer: ResMut
 }
 
 fn player_ui(mut commands: Commands) {}
+
+fn grab_cursor(mut window_query: Query<&mut Window>) {
+    if let Ok(mut window) = window_query.get_single_mut() {
+        window.cursor.grab_mode = CursorGrabMode::Locked;
+        window.cursor.visible = false;
+    }
+}
 
 fn setup_graphics(mut commands: Commands, game_assets: Res<GameAssets>) {
     commands.spawn(DirectionalLightBundle {
@@ -131,6 +152,7 @@ fn add_scene_colliders(
 struct Player {
     speed: f32,
     velocity: Vec3,
+    jump_strenght: f32,
 }
 
 #[derive(Component, Default, Clone, Debug)]
@@ -138,24 +160,33 @@ struct PlayerCamera {
     sensitivity: Vec3,
 }
 
-fn spawn_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+#[derive(Component, Default, Clone, Debug)]
+struct Anvil {}
+
+fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
+    commands.spawn((
+        Anvil::default(),
+        Name::new("Anvil"),
+        Velocity::default(),
+        RigidBody::Dynamic,
+        SceneBundle {
+            scene: game_assets.anvil.clone(),
+            transform: Transform::from_xyz(0.0, 14.0, 0.0),
+            ..default()
+        },
+        ColliderMassProperties::Density(10.0),
+    ));
     commands
         .spawn((
-            /*
-            PbrBundle {
-                mesh: meshes.add(Mesh::from(shape::Cube { size: 2.0 })),
-                transform: Transform::from_xyz(0.0, 14.0, 2.0),
-                ..default()
+            Name::new("Player"),
+            Player {
+                speed: 10.0,
+                velocity: Vec3::ZERO,
+                jump_strenght: 0.2,
             },
-            */
             TransformBundle {
                 local: Transform::from_xyz(0.0, 14.0, 2.0),
                 ..default()
-            },
-            Name::new("Player"),
-            Player {
-                speed: 2.0,
-                velocity: Vec3::ZERO,
             },
             Velocity::default(),
             RigidBody::KinematicPositionBased,
@@ -169,16 +200,16 @@ fn spawn_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
                 }),
                 ..default()
             },
-            Friction {
-                coefficient: 200.0,
-                ..default()
-            },
             Collider::capsule(Vec3::new(0.0, 0.25, 0.0), Vec3::new(0.0, 1.5, 0.0), 0.25),
         ))
         .with_children(|parent| {
             parent.spawn((
                 Camera3dBundle {
                     transform: Transform::from_xyz(0.0, 1.5, 0.0),
+                    projection: Projection::Perspective(PerspectiveProjection {
+                        fov: 20.0,
+                        ..default()
+                    }),
                     ..default()
                 },
                 PlayerCamera {
@@ -188,7 +219,7 @@ fn spawn_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
         });
 }
 
-fn movement(
+fn player_movement(
     mut player_query: Query<
         (
             &mut Player,
@@ -206,7 +237,11 @@ fn movement(
     if let Ok((mut player, mut tr, mut vel, mut contr)) = player_query.get_single_mut() {
         if let Ok((cam, mut cam_tr)) = cam_query.get_single_mut() {
             for mov in mouse_motion_events.iter() {
-                cam_tr.rotate_local_x(-mov.delta.y * cam.sensitivity.y);
+                let pitch = cam_tr.rotation.to_euler(EulerRot::XYZ).0;
+                let amt = -mov.delta.y * cam.sensitivity.y;
+                if pitch + amt > -PI / 2.0 && pitch + amt < PI / 2.0 {
+                    cam_tr.rotate_local_x(amt);
+                }
                 tr.rotate_y(-mov.delta.x * cam.sensitivity.y);
             }
 
@@ -227,12 +262,33 @@ fn movement(
             if acceleration.length_squared() > 1.0 {
                 acceleration = acceleration.normalize()
             }
-            acceleration += Vec3::NEG_Y * 9.8 * time.delta_seconds() * 10.0;
-            player.velocity = acceleration * time.delta_seconds();
+            acceleration += Vec3::NEG_Y * 0.6;
+            player.velocity += acceleration * time.delta_seconds();
             player.velocity.x *= 0.9;
             player.velocity.z *= 0.9;
 
-            contr.translation = Some(player.velocity);
+            contr.translation = Some(player.velocity * time.delta_seconds() * 100.0);
+        }
+    }
+}
+
+fn player_gravity(mut player_query: Query<(&mut Player, &KinematicCharacterControllerOutput)>) {
+    if let Ok((mut player, out)) = player_query.get_single_mut() {
+        if out.grounded {
+            player.velocity.y = 0.0;
+        }
+    }
+}
+
+fn player_jump(
+    mut player_query: Query<(&mut Player, &KinematicCharacterControllerOutput)>,
+    keys: Res<Input<KeyCode>>,
+) {
+    if keys.pressed(KeyCode::Space) {
+        if let Ok((mut player, out)) = player_query.get_single_mut() {
+            if out.grounded {
+                player.velocity.y = player.jump_strenght;
+            }
         }
     }
 }
