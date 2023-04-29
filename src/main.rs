@@ -36,12 +36,17 @@ fn main() {
         .add_system(add_scene_colliders.in_set(OnUpdate(GameState::PrepareScene)))
         .add_system(soundtrack.in_schedule(OnEnter(GameState::Play)))
         .add_systems(
-            (player_movement, player_gravity, player_jump, hands)
+            (player_movement, player_gravity, player_jump, player_pickup)
                 .chain()
                 .in_set(OnUpdate(GameState::Play)),
         )
+        .add_system(anvil_held.in_base_set(PhysicsSet::Writeback))
         .init_resource::<AudioMixer>()
         .insert_resource(DirectionalLightShadowMap { size: 4096 })
+        .insert_resource(AmbientLight {
+            color: Color::WHITE,
+            brightness: 1.0 / 5.0f32,
+        })
         .run();
 }
 
@@ -85,7 +90,8 @@ fn player_ui(mut commands: Commands) {}
 fn grab_cursor(mut window_query: Query<&mut Window>) {
     if let Ok(mut window) = window_query.get_single_mut() {
         window.cursor.grab_mode = CursorGrabMode::Locked;
-        window.cursor.visible = false;
+        //window.cursor.visible = false;
+        window.cursor.visible = true;
     }
 }
 
@@ -95,16 +101,13 @@ fn setup_graphics(mut commands: Commands, game_assets: Res<GameAssets>) {
             shadows_enabled: true,
             ..default()
         },
-        // This is a relatively small scene, so use tighter shadow
-        // cascade bounds than the default for better quality.
-        // We also adjusted the shadow map to be larger since we're
-        // only using a single cascade.
         cascade_shadow_config: CascadeShadowConfigBuilder {
-            num_cascades: 1,
-            maximum_distance: 1.6,
+            num_cascades: 4,
+            maximum_distance: 1000.0,
             ..default()
         }
         .into(),
+        transform: Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.5, 0.0)),
         ..default()
     });
     commands.spawn(SceneBundle {
@@ -116,24 +119,26 @@ fn setup_graphics(mut commands: Commands, game_assets: Res<GameAssets>) {
 
 fn add_scene_colliders(
     mut commands: Commands,
-    scene_query: Query<Entity, &SceneInstance>,
+    scene_query: Query<(Entity, &SceneInstance)>,
     children: Query<&Children>,
     has_mesh: Query<(&Transform, &Handle<Mesh>)>,
+    has_name: Query<&Name>,
     meshes: ResMut<Assets<Mesh>>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     if scene_query.is_empty() {
         return;
     }
+    // very ugly
     if children
-        .iter_descendants(scene_query.iter().next().unwrap())
-        .next()
-        == None
+        .iter_descendants(scene_query.iter().next().unwrap().0)
+        .count()
+        < 2
     {
         return;
     }
 
-    for scene in &scene_query {
+    for (scene, _) in scene_query.iter() {
         for descendant in children.iter_descendants(scene) {
             if let Ok((_transform, mesh)) = has_mesh.get(descendant) {
                 let rapier_collider = Collider::from_bevy_mesh(
@@ -141,7 +146,15 @@ fn add_scene_colliders(
                     &ComputedColliderShape::TriMesh,
                 )
                 .unwrap();
-                commands.entity(descendant).insert(rapier_collider);
+                // ugly, but will do
+                if let Ok(name) = has_name.get(scene) {
+                    if name.as_ref() == "Anvil" {
+                        commands.entity(scene).insert(rapier_collider);
+                    }
+                    dbg!(name);
+                } else {
+                    commands.entity(descendant).insert(rapier_collider);
+                }
             }
         }
     }
@@ -153,6 +166,7 @@ struct Player {
     speed: f32,
     velocity: Vec3,
     jump_strenght: f32,
+    pickup_distance: f32,
 }
 
 #[derive(Component, Default, Clone, Debug)]
@@ -162,6 +176,9 @@ struct PlayerCamera {
 
 #[derive(Component, Default, Clone, Debug)]
 struct Anvil {}
+
+#[derive(Component, Default, Clone, Debug)]
+struct Held {}
 
 fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
     commands.spawn((
@@ -175,6 +192,7 @@ fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
             ..default()
         },
         ColliderMassProperties::Density(10.0),
+        CollisionGroups::new(Group::GROUP_2, Group::ALL),
     ));
     commands
         .spawn((
@@ -182,7 +200,8 @@ fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
             Player {
                 speed: 10.0,
                 velocity: Vec3::ZERO,
-                jump_strenght: 0.2,
+                jump_strenght: 0.07,
+                pickup_distance: 2.0,
             },
             TransformBundle {
                 local: Transform::from_xyz(0.0, 14.0, 2.0),
@@ -201,6 +220,7 @@ fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
                 ..default()
             },
             Collider::capsule(Vec3::new(0.0, 0.25, 0.0), Vec3::new(0.0, 1.5, 0.0), 0.25),
+            CollisionGroups::new(Group::GROUP_1, Group::ALL),
         ))
         .with_children(|parent| {
             parent.spawn((
@@ -224,7 +244,6 @@ fn player_movement(
         (
             &mut Player,
             &mut Transform,
-            &mut Velocity,
             &mut KinematicCharacterController,
         ),
         Without<PlayerCamera>,
@@ -234,7 +253,7 @@ fn player_movement(
     mut cam_query: Query<(&mut PlayerCamera, &mut Transform), Without<Player>>,
     mut mouse_motion_events: EventReader<MouseMotion>,
 ) {
-    if let Ok((mut player, mut tr, mut vel, mut contr)) = player_query.get_single_mut() {
+    if let Ok((mut player, mut tr, mut contr)) = player_query.get_single_mut() {
         if let Ok((cam, mut cam_tr)) = cam_query.get_single_mut() {
             for mov in mouse_motion_events.iter() {
                 let pitch = cam_tr.rotation.to_euler(EulerRot::XYZ).0;
@@ -262,7 +281,7 @@ fn player_movement(
             if acceleration.length_squared() > 1.0 {
                 acceleration = acceleration.normalize()
             }
-            acceleration += Vec3::NEG_Y * 0.6;
+            acceleration += Vec3::NEG_Y * 0.2;
             player.velocity += acceleration * time.delta_seconds();
             player.velocity.x *= 0.9;
             player.velocity.z *= 0.9;
@@ -293,9 +312,57 @@ fn player_jump(
     }
 }
 
-fn hands(
-    mut player_query: Query<(&mut Player, &mut Transform, &mut Velocity)>,
+fn player_pickup(
+    mut commands: Commands,
+    mut player_query: Query<(&Player, &Transform), Without<Anvil>>,
+    mut anvil_query: Query<(Entity, &mut Anvil, &Transform), Without<Player>>,
+    held_query: Query<&Held>,
     keys: Res<Input<KeyCode>>,
-    time: Res<Time>,
 ) {
+    match (player_query.get_single_mut(), anvil_query.get_single_mut()) {
+        (Ok((player, tr_player)), Ok((anvil_ent, _anvil, tr_anvil))) => {
+            if keys.just_pressed(KeyCode::E) {
+                if held_query.get(anvil_ent).is_err() {
+                    dbg!("ere");
+                    let dist = tr_anvil.translation.distance_squared(tr_player.translation);
+                    if dist < player.pickup_distance * player.pickup_distance {
+                        commands.entity(anvil_ent).insert((
+                            Held::default(),
+                            RigidBody::Fixed,
+                            CollisionGroups::new(Group::GROUP_2, Group::NONE),
+                        ));
+                    }
+                } else {
+                    dbg!("ethee");
+                    commands
+                        .entity(anvil_ent)
+                        .insert((
+                            RigidBody::Dynamic,
+                            Velocity {
+                                linvel: player.velocity,
+                                ..default()
+                            },
+                            CollisionGroups::new(Group::GROUP_2, Group::ALL),
+                        ))
+                        .remove::<Held>();
+                }
+            }
+        }
+        (_, _) => {}
+    }
+}
+
+fn anvil_held(
+    mut player_query: Query<(&Player, &Transform), Without<Anvil>>,
+    mut anvil_query: Query<(&mut Anvil, &mut Transform, &Held), Without<Player>>,
+) {
+    match (player_query.get_single_mut(), anvil_query.get_single_mut()) {
+        (Ok((_player, tr_player)), Ok((_anvil, mut tr_anvil, _held))) => {
+            let off = tr_player.forward() + tr_player.up();
+            tr_anvil.translation = tr_player.translation + off;
+            tr_anvil.rotation =
+                Quat::from_axis_angle(tr_player.up(), tr_player.rotation.to_euler(EulerRot::XYZ).1);
+        }
+        (_, _) => {}
+    }
 }
