@@ -53,6 +53,7 @@ fn main() {
                 reset_request,
                 check_reach_objective,
                 anvil_held,
+                cheat_powerup,
             )
                 .chain()
                 .in_set(OnUpdate(GameState::Play)),
@@ -64,8 +65,25 @@ fn main() {
             color: Color::WHITE,
             brightness: 1.0 / 5.0f32,
         })
+        .insert_resource(Info {
+            obj_info: vec![
+                ObjectiveInfo {
+                    powerup: Powerup::Weight,
+                    description: "You feel more attracted to the anvil!".to_string(),
+                },
+                ObjectiveInfo {
+                    powerup: Powerup::Strenght,
+                    description: "Throw power increased!".to_string(),
+                },
+                ObjectiveInfo {
+                    powerup: Powerup::Speed,
+                    description: "Speed increased!".to_string(),
+                },
+            ],
+        })
         .insert_resource(Progress {
-            current_objective: 0,
+            objectives: vec![],
+            powerups: vec![],
         })
         .run();
 }
@@ -146,7 +164,7 @@ fn add_scene_colliders(
     mut commands: Commands,
     scene_query: Query<(Entity, &SceneInstance)>,
     children: Query<&Children>,
-    has_mesh: Query<(&Transform, &Handle<Mesh>)>,
+    has_mesh: Query<(&Transform, &GlobalTransform, &Handle<Mesh>)>,
     has_name: Query<&Name>,
     meshes: ResMut<Assets<Mesh>>,
     mut next_state: ResMut<NextState<GameState>>,
@@ -165,7 +183,7 @@ fn add_scene_colliders(
 
     for (scene, _) in scene_query.iter() {
         for descendant in children.iter_descendants(scene) {
-            if let Ok((_transform, mesh)) = has_mesh.get(descendant) {
+            if let Ok((transform, gt, mesh)) = has_mesh.get(descendant) {
                 let rapier_collider = Collider::from_bevy_mesh(
                     meshes.get(mesh).unwrap(),
                     &ComputedColliderShape::TriMesh,
@@ -174,14 +192,20 @@ fn add_scene_colliders(
                 // ugly, but will do
                 if let Ok(name) = has_name.get(scene) {
                     if name.as_ref() == "Anvil" {
-                        //commands.entity(scene).insert(rapier_collider);
+                        commands.entity(scene).insert(Transient::default());
                     }
                 } else {
                     if let Ok(name) = has_name.get(descendant) {
                         if let Some(num) = name.as_ref().split("Objective").skip(1).next() {
-                            commands.entity(descendant).insert(Objective {
-                                num: num.parse().unwrap(),
-                            });
+                            commands.spawn((
+                                TransformBundle {
+                                    local: Transform::from_translation(gt.translation()),
+                                    ..default()
+                                },
+                                Objective {
+                                    num: num.parse().unwrap(),
+                                },
+                            ));
                         }
                     }
                     commands.entity(descendant).insert(rapier_collider);
@@ -223,7 +247,27 @@ struct Objective {
 
 #[derive(Resource, Default, Clone, Debug)]
 struct Progress {
-    current_objective: u32,
+    objectives: Vec<u32>,
+    powerups: Vec<Powerup>,
+}
+
+#[derive(Resource, Default, Clone, Debug)]
+struct Info {
+    obj_info: Vec<ObjectiveInfo>,
+}
+
+#[derive(Default, Clone, Debug)]
+struct ObjectiveInfo {
+    description: String,
+    powerup: Powerup,
+}
+
+#[derive(Component, Default, Clone, Debug, PartialEq)]
+enum Powerup {
+    #[default]
+    Strenght,
+    Weight,
+    Speed,
 }
 
 fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
@@ -262,7 +306,7 @@ fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
                 speed: 1.0,
                 velocity: Vec3::ZERO,
                 jump_strenght: 0.07,
-                pickup_distance: 2.0,
+                pickup_distance: 3.0,
                 cooldown: Timer::from_seconds(0.3, TimerMode::Once),
                 launched: false,
             },
@@ -326,6 +370,7 @@ fn player_movement(
     time: Res<Time>,
     mut cam_query: Query<(&mut PlayerCamera, &mut Transform), Without<Player>>,
     mut mouse_motion_events: EventReader<MouseMotion>,
+    progress: Res<Progress>,
 ) {
     if let Ok((mut player, mut tr, mut contr)) = player_query.get_single_mut() {
         if let Ok((cam, mut cam_tr)) = cam_query.get_single_mut() {
@@ -353,6 +398,9 @@ fn player_movement(
             }
             if acceleration.length_squared() > 1.0 {
                 acceleration = acceleration.normalize()
+            }
+            if progress.powerups.contains(&Powerup::Speed) {
+                //acceleration *= 1.5;
             }
             acceleration *= player.speed;
             if !anvil_held_query.is_empty() {
@@ -408,6 +456,7 @@ fn player_hold(
     held_query: Query<&Held>,
     keys: Res<Input<KeyCode>>,
     time: Res<Time>,
+    progress: Res<Progress>,
 ) {
     match (player_query.get_single_mut(), anvil_query.get_single_mut()) {
         (Ok((mut player, tr_player, out)), Ok((anvil_ent, _anvil, tr_anvil, mut vel))) => {
@@ -427,8 +476,12 @@ fn player_hold(
                         //if player.velocity.length_squared() > 1.0 {
                         //    delta = delta.normalize() / player.velocity.length_squared();
                         //}
-                        vel.linvel -= delta * 0.03;
-                        player.velocity += delta * 0.004;
+                        let mut amt = 0.003;
+                        if progress.powerups.contains(&Powerup::Weight) {
+                            amt = 0.005;
+                        }
+                        vel.linvel -= delta * amt * 0.2;
+                        player.velocity += delta * amt;
                     }
                 }
             } else {
@@ -455,12 +508,16 @@ fn player_hold(
                         .any(|coll| held_query.get(coll.entity).is_ok());
                     if out.grounded && !on_held_anvil {
                         if let Ok((_, tr_cam)) = cam_query.get_single_mut() {
+                            let mut str = 10.0;
+                            if progress.powerups.contains(&Powerup::Strenght) {
+                                str = 15.0;
+                            }
                             commands
                                 .entity(anvil_ent)
                                 .insert((
                                     RigidBody::Dynamic,
                                     Velocity {
-                                        linvel: player.velocity * 80.0 + tr_cam.forward() * 10.0,
+                                        linvel: player.velocity * 80.0 + tr_cam.forward() * str,
                                         ..default()
                                     },
                                     CollisionGroups::new(Group::GROUP_2, Group::ALL),
@@ -481,7 +538,7 @@ fn anvil_held(
 ) {
     match (player_query.get_single_mut(), anvil_query.get_single_mut()) {
         (Ok((_player, tr_player)), Ok((_anvil, mut tr_anvil, _held))) => {
-            let off = tr_player.forward() * 1.2 + tr_player.up() * 1.0;
+            let off = tr_player.forward() * 1.2 + tr_player.up() * 0.85;
             tr_anvil.translation = tr_player.translation + off;
             let mut angle = tr_player.rotation.to_euler(EulerRot::XYZ).1;
             // i'm stupid, can't figure out why this is needed
@@ -495,20 +552,25 @@ fn anvil_held(
 }
 
 fn check_reach_objective(
-    obj_query: Query<(&Objective, &Transform), Without<Objective>>,
+    obj_query: Query<(&Objective, &Transform), Without<Anvil>>,
     anvil_query: Query<(&Anvil, &Transform), Without<Objective>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut progress: ResMut<Progress>,
+    info: ResMut<Info>,
 ) {
     if let Ok((_, tr_anvil)) = anvil_query.get_single() {
-        if let Some((_, tr_current_obj)) = obj_query
-            .iter()
-            .find(|(obj, _)| obj.num == progress.current_objective)
-        {
+        for (obj, tr_current_obj) in obj_query.iter() {
+            if progress.objectives.contains(&obj.num) {
+                continue;
+            }
             let delta = tr_anvil.translation - (tr_current_obj.translation + Vec3::Y);
             if delta.length_squared() < 25.0 {
                 next_state.set(GameState::PrepareScene);
-                progress.current_objective += 1;
+                progress.objectives.push(obj.num);
+                // lol useful
+                progress
+                    .powerups
+                    .push(info.obj_info[obj.num as usize].powerup.clone());
             }
         }
     }
@@ -517,6 +579,24 @@ fn check_reach_objective(
 fn reset_request(keys: Res<Input<KeyCode>>, mut next_state: ResMut<NextState<GameState>>) {
     if keys.just_pressed(KeyCode::Delete) {
         next_state.set(GameState::PrepareScene);
+    }
+}
+
+fn cheat_powerup(keys: Res<Input<KeyCode>>, mut progress: ResMut<Progress>, info: ResMut<Info>) {
+    if keys.just_pressed(KeyCode::Key1) {
+        progress
+            .powerups
+            .push(info.obj_info[0 as usize].powerup.clone());
+    }
+    if keys.just_pressed(KeyCode::Key2) {
+        progress
+            .powerups
+            .push(info.obj_info[1 as usize].powerup.clone());
+    }
+    if keys.just_pressed(KeyCode::Key2) {
+        progress
+            .powerups
+            .push(info.obj_info[2 as usize].powerup.clone());
     }
 }
 
