@@ -1,4 +1,6 @@
-use bevy::{pbr::CascadeShadowConfigBuilder, prelude::*};
+use bevy::{
+    input::mouse::MouseMotion, pbr::CascadeShadowConfigBuilder, prelude::*, scene::SceneInstance,
+};
 use bevy_asset_loader::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_rapier3d::{prelude::*, render::RapierDebugRenderPlugin};
@@ -18,14 +20,19 @@ fn main() {
         .add_plugin(WorldInspectorPlugin::new())
         .insert_resource(ClearColor(Color::BLACK))
         .add_loading_state(
-            LoadingState::new(GameState::AssetLoading).continue_to_state(GameState::Play),
+            LoadingState::new(GameState::AssetLoading).continue_to_state(GameState::PrepareScene),
         )
         .add_collection_to_loading_state::<_, GameAssets>(GameState::AssetLoading)
         .add_systems(
-            (setup_graphics, spawn_player, player_ui, soundtrack)
-                .in_schedule(OnEnter(GameState::Play)),
+            (setup_graphics, spawn_player, player_ui).in_schedule(OnEnter(GameState::PrepareScene)),
         )
-        .add_systems((movement, hands).in_set(OnUpdate(GameState::Play)))
+        .add_system(add_scene_colliders.in_set(OnUpdate(GameState::PrepareScene)))
+        .add_system(soundtrack.in_schedule(OnEnter(GameState::Play)))
+        .add_systems(
+            (movement, camera_view, hands)
+                .chain()
+                .in_set(OnUpdate(GameState::Play)),
+        )
         .init_resource::<AudioMixer>()
         .run();
 }
@@ -34,6 +41,7 @@ fn main() {
 enum GameState {
     #[default]
     AssetLoading,
+    PrepareScene,
     Play,
 }
 
@@ -64,17 +72,7 @@ fn soundtrack(game_assets: Res<GameAssets>, audio: Res<Audio>, mut mixer: ResMut
 
 fn player_ui(mut commands: Commands) {}
 
-fn setup_graphics(
-    mut commands: Commands,
-    game_assets: Res<GameAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    commands.spawn((Camera3dBundle {
-        transform: Transform::from_xyz(40.0, 40.0, 1.0)
-            .looking_at(Vec3::new(0.0, 0.3, 0.0), Vec3::Y),
-        ..default()
-    },));
-
+fn setup_graphics(mut commands: Commands, game_assets: Res<GameAssets>) {
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
             shadows_enabled: true,
@@ -92,19 +90,45 @@ fn setup_graphics(
         .into(),
         ..default()
     });
-    dbg!(&game_assets.testcity);
     commands.spawn(SceneBundle {
         scene: game_assets.testcity.clone(),
         transform: Transform::default().with_scale(Vec3::splat(1.0)),
         ..default()
     });
-    /*
-    commands.spawn((PbrBundle {
-        mesh: meshes.add(Mesh::from(shape::Cube { size: 20.0 })),
-        transform: Transform::from_xyz(0.0, 0.0, 0.0),
-        ..Default::default()
-    },));
-    */
+}
+
+fn add_scene_colliders(
+    mut commands: Commands,
+    scene_query: Query<Entity, &SceneInstance>,
+    children: Query<&Children>,
+    has_mesh: Query<(&Transform, &Handle<Mesh>)>,
+    meshes: ResMut<Assets<Mesh>>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    if scene_query.is_empty() {
+        return;
+    }
+    if children
+        .iter_descendants(scene_query.iter().next().unwrap())
+        .next()
+        == None
+    {
+        return;
+    }
+
+    for scene in &scene_query {
+        for descendant in children.iter_descendants(scene) {
+            if let Ok((_transform, mesh)) = has_mesh.get(descendant) {
+                let rapier_collider = Collider::from_bevy_mesh(
+                    meshes.get(mesh).unwrap(),
+                    &ComputedColliderShape::TriMesh,
+                )
+                .unwrap();
+                commands.entity(descendant).insert(rapier_collider);
+            }
+        }
+    }
+    next_state.set(GameState::Play);
 }
 
 #[derive(Component, Default, Clone, Debug)]
@@ -112,22 +136,35 @@ struct Player {
     speed: f32,
 }
 
-fn spawn_player(
-    mut commands: Commands,
-    game_assets: Res<GameAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    commands.spawn((
-        PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::Cube { size: 2.0 })),
-            transform: Transform::from_xyz(0.0, 0.0, 2.0),
-            ..Default::default()
-        },
-        Player { speed: 100.0 },
-        Velocity::default(),
-        RigidBody::Dynamic,
-        Collider::capsule(Vec3::new(0.0, 0.25, 0.0), Vec3::new(0.0, 1.5, 0.0), 0.25),
-    ));
+#[derive(Component, Default, Clone, Debug)]
+struct PlayerCamera {
+    sensitivity: Vec3,
+}
+
+fn spawn_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+    commands
+        .spawn((
+            PbrBundle {
+                mesh: meshes.add(Mesh::from(shape::Cube { size: 2.0 })),
+                transform: Transform::from_xyz(0.0, 14.0, 2.0),
+                ..default()
+            },
+            Player { speed: 100.0 },
+            Velocity::default(),
+            RigidBody::Dynamic,
+            Collider::capsule(Vec3::new(0.0, 0.25, 0.0), Vec3::new(0.0, 1.5, 0.0), 0.25),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Camera3dBundle {
+                    transform: Transform::from_xyz(0.0, 1.5, 0.0),
+                    ..default()
+                },
+                PlayerCamera {
+                    sensitivity: Vec3::new(0.04, 0.04, 1.0),
+                },
+            ));
+        });
 }
 
 fn movement(
@@ -149,8 +186,24 @@ fn movement(
         if keys.pressed(KeyCode::A) {
             acceleration -= tr.right();
         }
-        let acceleration = acceleration.normalize() * player.speed;
-        vel.linvel += acceleration * time.delta_seconds();
+        let norm = if acceleration.length_squared() > 1.0 {
+            acceleration.normalize()
+        } else {
+            acceleration
+        };
+        vel.linvel += norm * player.speed * time.delta_seconds();
+    }
+}
+
+fn camera_view(
+    mut cam_query: Query<(&mut PlayerCamera, &mut Transform)>,
+    mut mouse_motion_events: EventReader<MouseMotion>,
+) {
+    if let Ok((cam, mut tr)) = cam_query.get_single_mut() {
+        for mov in mouse_motion_events.iter() {
+            tr.rotate_local_x(-mov.delta.y * cam.sensitivity.y);
+            tr.rotate_y(-mov.delta.x * cam.sensitivity.y);
+        }
     }
 }
 
