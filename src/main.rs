@@ -28,11 +28,7 @@ fn main() {
         )
         .add_system(add_scene_colliders.in_set(OnUpdate(GameState::PrepareScene)))
         .add_system(soundtrack.in_schedule(OnEnter(GameState::Play)))
-        .add_systems(
-            (movement, camera_view, hands)
-                .chain()
-                .in_set(OnUpdate(GameState::Play)),
-        )
+        .add_systems((movement, hands).chain().in_set(OnUpdate(GameState::Play)))
         .init_resource::<AudioMixer>()
         .run();
 }
@@ -134,6 +130,7 @@ fn add_scene_colliders(
 #[derive(Component, Default, Clone, Debug)]
 struct Player {
     speed: f32,
+    velocity: Vec3,
 }
 
 #[derive(Component, Default, Clone, Debug)]
@@ -144,14 +141,38 @@ struct PlayerCamera {
 fn spawn_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     commands
         .spawn((
+            /*
             PbrBundle {
                 mesh: meshes.add(Mesh::from(shape::Cube { size: 2.0 })),
                 transform: Transform::from_xyz(0.0, 14.0, 2.0),
                 ..default()
             },
-            Player { speed: 100.0 },
+            */
+            TransformBundle {
+                local: Transform::from_xyz(0.0, 14.0, 2.0),
+                ..default()
+            },
+            Name::new("Player"),
+            Player {
+                speed: 2.0,
+                velocity: Vec3::ZERO,
+            },
             Velocity::default(),
-            RigidBody::Dynamic,
+            RigidBody::KinematicPositionBased,
+            KinematicCharacterController {
+                max_slope_climb_angle: 45.0_f32.to_radians(),
+                min_slope_slide_angle: 30.0_f32.to_radians(),
+                autostep: Some(CharacterAutostep {
+                    max_height: CharacterLength::Absolute(0.5),
+                    min_width: CharacterLength::Absolute(0.2),
+                    include_dynamic_bodies: true,
+                }),
+                ..default()
+            },
+            Friction {
+                coefficient: 200.0,
+                ..default()
+            },
             Collider::capsule(Vec3::new(0.0, 0.25, 0.0), Vec3::new(0.0, 1.5, 0.0), 0.25),
         ))
         .with_children(|parent| {
@@ -161,48 +182,57 @@ fn spawn_player(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
                     ..default()
                 },
                 PlayerCamera {
-                    sensitivity: Vec3::new(0.04, 0.04, 1.0),
+                    sensitivity: Vec3::new(0.004, 0.004, 1.0),
                 },
             ));
         });
 }
 
 fn movement(
-    mut player_query: Query<(&mut Player, &mut Transform, &mut Velocity)>,
+    mut player_query: Query<
+        (
+            &mut Player,
+            &mut Transform,
+            &mut Velocity,
+            &mut KinematicCharacterController,
+        ),
+        Without<PlayerCamera>,
+    >,
     keys: Res<Input<KeyCode>>,
     time: Res<Time>,
-) {
-    if let Ok((player, tr, mut vel)) = player_query.get_single_mut() {
-        let mut acceleration = Vec3::new(0.0, 0.0, 0.0);
-        if keys.pressed(KeyCode::W) {
-            acceleration += tr.forward();
-        }
-        if keys.pressed(KeyCode::S) {
-            acceleration -= tr.forward();
-        }
-        if keys.pressed(KeyCode::D) {
-            acceleration += tr.right();
-        }
-        if keys.pressed(KeyCode::A) {
-            acceleration -= tr.right();
-        }
-        let norm = if acceleration.length_squared() > 1.0 {
-            acceleration.normalize()
-        } else {
-            acceleration
-        };
-        vel.linvel += norm * player.speed * time.delta_seconds();
-    }
-}
-
-fn camera_view(
-    mut cam_query: Query<(&mut PlayerCamera, &mut Transform)>,
+    mut cam_query: Query<(&mut PlayerCamera, &mut Transform), Without<Player>>,
     mut mouse_motion_events: EventReader<MouseMotion>,
 ) {
-    if let Ok((cam, mut tr)) = cam_query.get_single_mut() {
-        for mov in mouse_motion_events.iter() {
-            tr.rotate_local_x(-mov.delta.y * cam.sensitivity.y);
-            tr.rotate_y(-mov.delta.x * cam.sensitivity.y);
+    if let Ok((mut player, mut tr, mut vel, mut contr)) = player_query.get_single_mut() {
+        if let Ok((cam, mut cam_tr)) = cam_query.get_single_mut() {
+            for mov in mouse_motion_events.iter() {
+                cam_tr.rotate_local_x(-mov.delta.y * cam.sensitivity.y);
+                tr.rotate_y(-mov.delta.x * cam.sensitivity.y);
+            }
+
+            let mut acceleration = Vec3::new(0.0, 0.0, 0.0);
+            if keys.pressed(KeyCode::W) {
+                acceleration += tr.forward();
+            }
+            if keys.pressed(KeyCode::S) {
+                acceleration -= tr.forward();
+            }
+            if keys.pressed(KeyCode::D) {
+                acceleration += tr.right();
+            }
+            if keys.pressed(KeyCode::A) {
+                acceleration -= tr.right();
+            }
+            acceleration *= player.speed;
+            if acceleration.length_squared() > 1.0 {
+                acceleration = acceleration.normalize()
+            }
+            acceleration += Vec3::NEG_Y * 9.8 * time.delta_seconds() * 10.0;
+            player.velocity = acceleration * time.delta_seconds();
+            player.velocity.x *= 0.9;
+            player.velocity.z *= 0.9;
+
+            contr.translation = Some(player.velocity);
         }
     }
 }
