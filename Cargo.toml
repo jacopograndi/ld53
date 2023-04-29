@@ -1,8 +1,25 @@
 [package]
-name = "ld53"
+name = "ld53-anvil-express"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+bevy = "0.10"
+bevy_asset_loader = { version = "0.16.0", features = ["3d"] }
+bevy_rapier3d = { version = "0.21.0", features = ["debug-render-3d"] }
+bevy-inspector-egui = "0.18.3"
+
+# Enable a small amount of optimization in debug mode
+[profile.dev]
+opt-level = 1
+
+# Enable high optimizations for dependencies (incl. Bevy), but not for our code:
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+# strip = true    # It seems it strips too much
+opt-level = "z" # Optimize for size.
+lto = "thin"    # Link Time Optimization
+#codegen-units = 1 # Too slow to compile
+panic = "abort"
