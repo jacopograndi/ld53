@@ -6,7 +6,10 @@ edition = "2021"
 [dependencies]
 bevy = "0.10"
 bevy_asset_loader = { version = "0.16.0", features = ["3d"] }
-bevy_rapier3d = { version = "0.21.0", features = ["debug-render-3d"] }
+bevy_rapier3d = { version = "0.21.0", features = [
+    "debug-render-3d",
+    "simd-nightly",
+] }
 bevy-inspector-egui = "0.18.3"
 
 # Enable a small amount of optimization in debug mode
