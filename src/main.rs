@@ -9,7 +9,6 @@ use bevy::{
     window::CursorGrabMode,
 };
 use bevy_asset_loader::prelude::*;
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_rapier3d::prelude::*;
 
 fn main() {
@@ -32,7 +31,7 @@ fn main() {
             },
             ..default()
         })
-        .add_plugin(WorldInspectorPlugin::new())
+        //.add_plugin(WorldInspectorPlugin::new())
         .insert_resource(ClearColor(Color::BLACK))
         .add_loading_state(
             LoadingState::new(GameState::AssetLoading).continue_to_state(GameState::PrepareScene),
@@ -104,6 +103,8 @@ struct GameAssets {
     testcity: Handle<Scene>,
     #[asset(path = "anvil.gltf#Scene0")]
     anvil: Handle<Scene>,
+    #[asset(path = "monof55.ttf")]
+    font: Handle<Font>,
 }
 
 #[derive(Resource, Default, Debug)]
@@ -123,7 +124,42 @@ fn soundtrack(game_assets: Res<GameAssets>, audio: Res<Audio>, mut mixer: ResMut
     */
 }
 
-fn player_ui(mut commands: Commands) {}
+fn player_ui(mut commands: Commands, game_assets: Res<GameAssets>) {
+    commands
+        .spawn(NodeBundle {
+            style: Style {
+                position_type: PositionType::Absolute,
+                position: UiRect::new(
+                    Val::Percent(0.0),
+                    Val::Percent(0.0),
+                    Val::Percent(0.0),
+                    Val::Percent(0.0),
+                ),
+                size: Size::new(Val::Percent(100.0), Val::Percent(10.0)),
+                ..default()
+            },
+            ..default()
+        })
+        .with_children(|parent| {
+            parent.spawn(TextBundle {
+                text: Text::from_section(
+                    "hello world!",
+                    TextStyle {
+                        font: game_assets.font.clone(),
+                        font_size: 60.0,
+                        color: Color::WHITE,
+                    },
+                ),
+                style: Style {
+                    size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                    border: UiRect::all(Val::Px(2.0)),
+                    ..default()
+                },
+                background_color: Color::rgb(0.0, 0.0, 0.65).into(),
+                ..default()
+            });
+        });
+}
 
 fn grab_cursor(mut window_query: Query<&mut Window>) {
     if let Ok(mut window) = window_query.get_single_mut() {
@@ -137,11 +173,12 @@ fn setup_graphics(mut commands: Commands, game_assets: Res<GameAssets>) {
         DirectionalLightBundle {
             directional_light: DirectionalLight {
                 shadows_enabled: true,
+                color: Color::rgb(1.0, 0.97, 0.97),
                 ..default()
             },
             cascade_shadow_config: CascadeShadowConfigBuilder {
                 num_cascades: 4,
-                maximum_distance: 1000.0,
+                maximum_distance: 2000.0,
                 ..default()
             }
             .into(),
@@ -400,7 +437,7 @@ fn player_movement(
                 acceleration = acceleration.normalize()
             }
             if progress.powerups.contains(&Powerup::Speed) {
-                //acceleration *= 1.5;
+                acceleration *= 1.2;
             }
             acceleration *= player.speed;
             if !anvil_held_query.is_empty() {
@@ -478,8 +515,9 @@ fn player_hold(
                         //}
                         let mut amt = 0.003;
                         if progress.powerups.contains(&Powerup::Weight) {
-                            amt = 0.005;
+                            amt = 0.004;
                         }
+                        amt *= time.delta_seconds() * 100.0;
                         vel.linvel -= delta * amt * 0.2;
                         player.velocity += delta * amt;
                     }
@@ -510,7 +548,7 @@ fn player_hold(
                         if let Ok((_, tr_cam)) = cam_query.get_single_mut() {
                             let mut str = 10.0;
                             if progress.powerups.contains(&Powerup::Strenght) {
-                                str = 15.0;
+                                str = 12.0;
                             }
                             commands
                                 .entity(anvil_ent)
@@ -568,9 +606,11 @@ fn check_reach_objective(
                 next_state.set(GameState::PrepareScene);
                 progress.objectives.push(obj.num);
                 // lol useful
-                progress
-                    .powerups
-                    .push(info.obj_info[obj.num as usize].powerup.clone());
+                if obj.num < 3 {
+                    progress
+                        .powerups
+                        .push(info.obj_info[obj.num as usize].powerup.clone());
+                }
             }
         }
     }
