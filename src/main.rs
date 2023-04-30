@@ -42,7 +42,7 @@ fn main() {
                 .in_schedule(OnEnter(GameState::PrepareScene)),
         )
         .add_system(add_scene_colliders.in_set(OnUpdate(GameState::PrepareScene)))
-        .add_system(soundtrack.in_schedule(OnEnter(GameState::Play)))
+        .add_system(soundtrack.in_schedule(OnExit(GameState::AssetLoading)))
         .add_systems(
             (
                 player_movement,
@@ -52,7 +52,8 @@ fn main() {
                 reset_request,
                 check_reach_objective,
                 anvil_held,
-                cheat_powerup,
+                toggle_help,
+                hit_events,
             )
                 .chain()
                 .in_set(OnUpdate(GameState::Play)),
@@ -83,6 +84,7 @@ fn main() {
         .insert_resource(Progress {
             objectives: vec![],
             powerups: vec![],
+            help: true,
         })
         .run();
 }
@@ -97,8 +99,10 @@ enum GameState {
 
 #[derive(AssetCollection, Resource)]
 struct GameAssets {
-    //#[asset(path = "ost.ogg")]
-    //ost: Handle<AudioSource>,
+    #[asset(path = "ost.ogg")]
+    ost: Handle<AudioSource>,
+    #[asset(path = "hit.ogg")]
+    hit: Handle<AudioSource>,
     #[asset(path = "testcity.gltf#Scene0")]
     testcity: Handle<Scene>,
     #[asset(path = "anvil.gltf#Scene0")]
@@ -113,7 +117,6 @@ struct AudioMixer {
 }
 
 fn soundtrack(game_assets: Res<GameAssets>, audio: Res<Audio>, mut mixer: ResMut<AudioMixer>) {
-    /*
     mixer.ost = audio.play_with_settings(
         game_assets.ost.clone_weak(),
         PlaybackSettings {
@@ -121,44 +124,193 @@ fn soundtrack(game_assets: Res<GameAssets>, audio: Res<Audio>, mut mixer: ResMut
             ..default()
         },
     );
-    */
 }
 
-fn player_ui(mut commands: Commands, game_assets: Res<GameAssets>) {
-    commands
-        .spawn(NodeBundle {
-            style: Style {
-                position_type: PositionType::Absolute,
-                position: UiRect::new(
-                    Val::Percent(0.0),
-                    Val::Percent(0.0),
-                    Val::Percent(0.0),
-                    Val::Percent(0.0),
-                ),
-                size: Size::new(Val::Percent(100.0), Val::Percent(10.0)),
+fn hit_events(
+    mut contact_force_events: EventReader<ContactForceEvent>,
+    game_assets: Res<GameAssets>,
+    audio: Res<Audio>,
+) {
+    for contact_force_event in contact_force_events.iter() {
+        let vol = contact_force_event.total_force.length();
+        let vol = (vol / 10000.0).clamp(0.0, 1.0);
+        audio.play_with_settings(
+            game_assets.hit.clone_weak(),
+            PlaybackSettings {
+                volume: vol,
                 ..default()
             },
-            ..default()
-        })
-        .with_children(|parent| {
-            parent.spawn(TextBundle {
-                text: Text::from_section(
-                    "hello world!",
-                    TextStyle {
-                        font: game_assets.font.clone(),
-                        font_size: 60.0,
-                        color: Color::WHITE,
-                    },
-                ),
+        );
+    }
+}
+
+const HELPTEXT: &str = "\
+Welcome, courier! This is the forge of Anvil Express.
+You have to deliver an anvil to three customers.
+
+Pick it up with [E].
+Hold [E] to be attracted to the anvil.
+Throw it with [Q] if you are not jumping.
+If you lose it, just press [Delete].
+
+The customers are identified by a blue light.
+Good luck!
+
+[H] to toggle this box.
+";
+
+#[derive(Component)]
+struct HelpTag;
+
+fn player_ui(mut commands: Commands, game_assets: Res<GameAssets>, progress: Res<Progress>) {
+    commands
+        .spawn((
+            NodeBundle {
                 style: Style {
-                    size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
-                    border: UiRect::all(Val::Px(2.0)),
+                    position_type: PositionType::Absolute,
+                    position: UiRect::new(
+                        Val::Percent(0.0),
+                        Val::Percent(0.0),
+                        Val::Percent(95.0),
+                        Val::Percent(0.0),
+                    ),
+                    size: Size::new(Val::Percent(100.0), Val::Percent(5.0)),
                     ..default()
                 },
-                background_color: Color::rgb(0.0, 0.0, 0.65).into(),
                 ..default()
-            });
+            },
+            Transient::default(),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                TextBundle {
+                    text: Text::from_section(
+                        "[H] of help",
+                        TextStyle {
+                            font: game_assets.font.clone(),
+                            font_size: 30.0,
+                            color: Color::WHITE,
+                        },
+                    ),
+                    style: Style {
+                        size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    ..default()
+                },
+                Transient::default(),
+            ));
         });
+    let status = if progress.objectives.len() == 3 {
+        "Congratulations, you have delivered all the anvils.".to_string()
+    } else {
+        format!("Anvils delivered {}/3", progress.objectives.len())
+    };
+    commands
+        .spawn((
+            NodeBundle {
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    position: UiRect::new(
+                        Val::Percent(0.0),
+                        Val::Percent(0.0),
+                        Val::Percent(0.0),
+                        Val::Percent(0.0),
+                    ),
+                    size: Size::new(Val::Percent(100.0), Val::Percent(10.0)),
+                    ..default()
+                },
+                ..default()
+            },
+            Transient::default(),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                TextBundle {
+                    text: Text::from_section(
+                        status,
+                        TextStyle {
+                            font: game_assets.font.clone(),
+                            font_size: 30.0,
+                            color: Color::WHITE,
+                        },
+                    ),
+                    style: Style {
+                        size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    ..default()
+                },
+                Transient::default(),
+            ));
+        });
+    commands
+        .spawn((
+            NodeBundle {
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    position: UiRect::new(
+                        Val::Percent(5.0),
+                        Val::Percent(0.0),
+                        Val::Percent(50.0),
+                        Val::Percent(0.0),
+                    ),
+                    size: Size::new(Val::Percent(90.0), Val::Percent(45.0)),
+                    ..default()
+                },
+                visibility: if progress.help {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                },
+                ..default()
+            },
+            HelpTag,
+            Transient::default(),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                TextBundle {
+                    text: Text::from_section(
+                        HELPTEXT,
+                        TextStyle {
+                            font: game_assets.font.clone(),
+                            font_size: 30.0,
+                            color: Color::WHITE,
+                        },
+                    ),
+                    style: Style {
+                        size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    background_color: Color::rgba(0.0, 0.0, 0.0, 0.99).into(),
+                    ..default()
+                },
+                Transient::default(),
+            ));
+        });
+}
+
+fn toggle_help(
+    mut commands: Commands,
+    mut progress: ResMut<Progress>,
+    mut help_query: Query<(Entity, &HelpTag)>,
+    keys: Res<Input<KeyCode>>,
+) {
+    if let Ok((ent, _)) = help_query.get_single_mut() {
+        if keys.just_pressed(KeyCode::H) {
+            if progress.help {
+                progress.help = false;
+                commands.entity(ent).insert(Visibility::Hidden);
+            } else {
+                progress.help = true;
+                commands.entity(ent).insert(Visibility::Visible);
+            }
+        }
+    }
 }
 
 fn grab_cursor(mut window_query: Query<&mut Window>) {
@@ -230,6 +382,7 @@ fn add_scene_colliders(
                 if let Ok(name) = has_name.get(scene) {
                     if name.as_ref() == "Anvil" {
                         commands.entity(scene).insert(Transient::default());
+                        commands.entity(descendant).insert(Transient::default());
                     }
                 } else {
                     if let Ok(name) = has_name.get(descendant) {
@@ -286,6 +439,7 @@ struct Objective {
 struct Progress {
     objectives: Vec<u32>,
     powerups: Vec<Powerup>,
+    help: bool,
 }
 
 #[derive(Resource, Default, Clone, Debug)]
@@ -335,6 +489,8 @@ fn spawn_player(mut commands: Commands, game_assets: Res<GameAssets>) {
         },
         Sleeping::disabled(),
         Transient::default(),
+        ActiveEvents::CONTACT_FORCE_EVENTS,
+        ContactForceEventThreshold(3000.0),
     ));
     commands
         .spawn((
@@ -443,20 +599,29 @@ fn player_movement(
             if !anvil_held_query.is_empty() {
                 acceleration *= 0.5;
             }
-            acceleration += Vec3::NEG_Y * 0.2;
+            acceleration += Vec3::NEG_Y * 0.3;
             player.velocity += acceleration * time.delta_seconds();
-            player.velocity.x *= 0.9;
-            player.velocity.z *= 0.9;
 
             contr.translation = Some(player.velocity * time.delta_seconds() * 100.0);
         }
     }
 }
 
-fn player_gravity(mut player_query: Query<(&mut Player, &KinematicCharacterControllerOutput)>) {
+fn player_gravity(
+    mut player_query: Query<(&mut Player, &KinematicCharacterControllerOutput)>,
+    anvil_held_query: Query<(Entity, &Anvil, &Held)>,
+) {
     if let Ok((mut player, out)) = player_query.get_single_mut() {
         if out.grounded {
             player.velocity.y = 0.0;
+            player.velocity.x *= 0.9;
+            player.velocity.z *= 0.9;
+        } else if anvil_held_query.is_empty() {
+            player.velocity.x *= 0.93;
+            player.velocity.z *= 0.93;
+        } else {
+            player.velocity.x *= 0.99;
+            player.velocity.z *= 0.99;
         }
     }
 }
